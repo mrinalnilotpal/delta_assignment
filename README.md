@@ -60,7 +60,7 @@ results/       # benchmark output (committed): CSVs + REPORT.md
 
 ## Design Principles
 
-These shape everything else and are non-negotiable in the reference system.
+These shape everything else and are non-negotiable in this design.
 
 1. **Single-writer event loop, no locks on the order path.** One thread reads
    the transport, parses it, mutates order + position state, and invokes
@@ -102,7 +102,7 @@ These shape everything else and are non-negotiable in the reference system.
 - `OrderStatus` is a single byte; `is_terminal()` marks the three terminal
   states (principle 3).
 - **Cancel/fill race handling (highest-signal detail):** `pending_cancel`
-  mirrors the reference `_outstandingSC`. A fill may drive status to
+  tracks an outstanding cancel independently of status. A fill may drive status to
   `PartiallyFilled`/`Filled` while a cancel is still outstanding; when that
   happens the incoming cancel-reject is an *artifact of the fill*, not a real
   error, so we mark `false_cancel_reject`. **The health model must exclude
@@ -230,7 +230,7 @@ exchange implements the same `ExchangeClient` as a real venue would.
   to "not supported". `place_order`/`cancel_order` return a rich `SendResult`
   (`Ok`, `RejectedLocally`, `TransportDown`, `RateLimited`, `Duplicate`).
 - `ExchangeRegistry` owns clients indexed by `VenueId`, with a
-  `name -> constructor` factory (stands in for the reference's dlopen plugin).
+  `name -> constructor` factory (a lightweight stand-in for a dlopen plugin loader).
 - `SimulatedExchange` implements the same interface with **deterministic, seeded**
   control over ack/fill latency, partial-fill chunking, reject injection,
   unsolicited cancels, event **reordering** (fill before ack), **duplicate**
@@ -315,10 +315,9 @@ both implement it; **switching between them requires no OrderManager changes.**
   3. **At the deadline:** cancel resting, cross the spread with an **IOC** for the
      residual, and if still unfilled mark the parent `incomplete_at_deadline` and
      alert. **Never a silent residual.**
-- **Unified deadline behaviour (worth calling out).** The reference had one
-  worker cross the spread at the deadline and another that only cancelled. We
-  **unified** it: both TWAP and POV cancel resting *and* send an IOC across the
-  spread at the deadline. Consistency beats a per-worker surprise.
+- **Unified deadline behaviour (worth calling out).** Both TWAP and POV share one
+  deadline policy: cancel resting *and* send an IOC across the spread for the
+  residual. Consistency beats a per-algo surprise.
 
 ## Signal transport & staleness (2.8)
 
@@ -337,10 +336,9 @@ because they fail differently**:
 | **Sequence gap** | wrap-aware `miss = (seq − expected + MOD) % MOD`, threshold-based | forward gap → **log & continue** (next full snapshot heals it); backward/near-wrap → **duplicate/reorder, dropped** |
 | **Heartbeat** | no signal within `hb_interval × hb_threshold` | producer presumed dead → **stop new work, cancel resting** (a stale target is worse than no target) |
 
-NaN/absurd target values are **rejected at ingest** (strengthened from the
-reference, which only logged) so they never enter the delta computation. The
-brief's delta itself is `OrderManager::execution_delta(inst, target) = target −
-(position + pending)`.
+NaN/absurd target values are **rejected at ingest** so they never enter the delta
+computation. The delta itself is `OrderManager::execution_delta(inst, target) =
+target − (position + pending)`.
 
 ## Order netting (2.9)
 
@@ -558,23 +556,22 @@ independence), and signals (age, gap, wrap, duplicate, heartbeat, NaN).
 
 ---
 
-## Part 3 — where this diverges from a "reference" production design
+## Notable design decisions
 
-Being explicit about divergences (judgement is part of the evaluation):
+Being explicit about the choices that shape the system (judgement is part of the
+evaluation):
 
 - **NaN/absurd targets are rejected at ingest**, not merely logged. A poisoned
   target must never reach the delta computation.
 - **Unified deadline behaviour across algos:** both TWAP and POV cancel resting
-  *and* cross with an IOC at the deadline, rather than one worker crossing and
-  another only cancelling. Consistency beats a per-worker surprise.
+  *and* cross with an IOC at the deadline, rather than one algo crossing and
+  another only cancelling. Consistency beats a per-algo surprise.
 - **A periodic reconciler that can emit a corrective order** (within a tight
-  band). A common production stance is *reconcile logs only, a separate
-  liquidator flattens risk*. We implement the brief's corrective path but flag its
-  tension honestly: **a corrective *trade* moves both the exchange and the OMS
-  book by the same amount**, so it truly closes a drift only when the drift is an
-  un-applied fill (a belief gap). We therefore keep the auto-heal band **tight**,
-  tag the order so it never pollutes metrics/netting, and **hard-stop** beyond the
-  band rather than trade our way into a bigger hole.
-- **Slippage is computed online** (the reference defers it offline). It is cheap
-  here and makes the `results/` report self-contained; the sampling is still
-  bounded (ring reservoir), honouring "capture cheap, aggregate off the hot path."
+  band). We flag its tension honestly: **a corrective *trade* moves both the
+  exchange and the OMS book by the same amount**, so it truly closes a drift only
+  when the drift is an un-applied fill (a belief gap). We therefore keep the
+  auto-heal band **tight**, tag the order so it never pollutes metrics/netting,
+  and **hard-stop** beyond the band rather than trade our way into a bigger hole.
+- **Slippage is computed online.** It is cheap here and makes the `results/`
+  report self-contained; the sampling is still bounded (ring reservoir), so we
+  capture cheaply and aggregate off the hot path.

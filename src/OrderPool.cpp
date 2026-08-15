@@ -13,7 +13,7 @@ OrderPool::OrderPool(uint32_t capacity)
          "OrderPool capacity must fit the 24-bit slot field");
 
   // Touch all bookkeeping memory now so the OS commits physical pages here,
-  // off the wire path (the same rationale as the reference ObjectPool memset).
+  // off the wire path.
   free_list_.reserve(capacity_);
   for (uint32_t i = 0; i < capacity_; ++i) {
     generation_[i] = 0;
