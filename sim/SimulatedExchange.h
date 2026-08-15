@@ -51,7 +51,6 @@ class SimulatedExchange : public ExchangeClient {
   // Fabricate an exchange-side position (e.g. a fill the OMS missed while down),
   // used to exercise reconciliation drift.
   void set_position(InstrumentId inst, Quantity q) { positions_[inst] = q; }
-  bool has_pending_events() const { return !queue_.empty(); }
 
   // Precise injectors for race scenarios (delivered on the next poll()).
   void inject_confirm(OrderIdRaw);

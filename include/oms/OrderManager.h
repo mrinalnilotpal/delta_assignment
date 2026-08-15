@@ -155,6 +155,9 @@ class OrderManager : public ExchangeEventSink {
   void publish(const OrderEvent&);
   void log_rejection(OrderIdRaw, EventKind, ValidationResult, Timestamp) const;
   void retire(OrderIdRaw, InstrumentId, Quantity remaining_to_cancel, Side);
+  // Shared body for cancel-ack and unsolicited-cancel: validate, go terminal,
+  // publish `pub`, retire. `unsolicited` adds the counter + warning log.
+  void finish_cancel(OrderIdRaw, Timestamp, EventKind, OrderEventKind pub, bool unsolicited);
   void trip_kill_switch(const std::string& reason);
   void cancel_working_orders();
 

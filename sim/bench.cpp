@@ -208,7 +208,10 @@ int main() {
   cyc.close();
 
   const uint64_t demotions = rig.health.trips(0) - trips_before;
+  const uint64_t unresolved = rig.health.unresolved(0);
+  const uint64_t recoveries = demotions > unresolved ? demotions - unresolved : 0;
   for (uint64_t i = 0; i < demotions; ++i) rig.metrics->add_demotion();
+  for (uint64_t i = 0; i < recoveries; ++i) rig.metrics->add_recovery();
 
   rig.metrics->write_summary_csv("results/metrics_summary.csv");
 

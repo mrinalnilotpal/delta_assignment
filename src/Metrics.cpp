@@ -24,13 +24,11 @@ void MetricsCollector::on_order_event(const OrderEvent& e) {
 
   switch (e.kind) {
     case OrderEventKind::Confirmed: {
-      // Fall back to the confirm-time mid if the driver did not note arrival.
-      if (arrival_mid_.find(e.internal_id) == arrival_mid_.end() && mds_ != nullptr) {
+      // Capture the arrival mid once, at confirm time.
+      if (mds_ != nullptr && !arrival_mid_.contains(e.internal_id)) {
         arrival_mid_[e.internal_id] = mds_->top_of_book(e.instrument).mid();
       }
-      // sent/confirmed can legitimately be 0 at logical time 0, so we do not
-      // treat 0 as "unset"; the ack latency is confirmed - sent regardless.
-      if (o->ts.confirmed >= o->ts.sent) ack_latency_.add(o->ts.confirmed - o->ts.sent);
+      ack_latency_.add(o->ts.confirmed - o->ts.sent);   // both may be 0 at t0
       break;
     }
     case OrderEventKind::Fill: {   // terminal (fully filled)

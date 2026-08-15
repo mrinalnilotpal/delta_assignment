@@ -73,7 +73,7 @@ ValidationResult OrderManager::validate(OrderIdRaw id, const EventContext& ev) c
   if (ev.kind == EventKind::Fill) {
     // (3) Duplicate trade id.
     auto it = trade_ids_.find(id);
-    if (it != trade_ids_.end() && it->second.count(ev.trade_id) > 0) {
+    if (it != trade_ids_.end() && it->second.contains(ev.trade_id)) {
       return ValidationResult::DuplicateTrade;
     }
     // (5) Field sanity: positive qty/price, and never over-fill. The overfill
@@ -221,8 +221,7 @@ OrderIdRaw OrderManager::submit(const OrderRequest& req) {
 
   positions_.try_emplace(req.instrument);
   pending_signed_[req.instrument] += signed_qty(req.side, req.size);
-  trade_ids_[id];   // create empty dedup set
-  live_.insert(id);
+  live_.insert(id);   // dedup set is created lazily on the first fill
 
   const SendResult r = ex->place_order(o);
   health_.on_order_sent(venue, now);
@@ -284,8 +283,10 @@ void OrderManager::on_confirm(OrderIdRaw id, const ExchangeOrderId& exch_id, Tim
   }
   o.ts.confirmed = ts;
 
+  // Confirm always follows a send, so ts.sent is set (and may legitimately be 0
+  // at logical time 0); record the ack latency unconditionally.
   const VenueId venue = decode_order_id(id).venue;
-  if (o.ts.sent > 0) health_.on_ack(venue, ts - o.ts.sent);
+  health_.on_ack(venue, ts - o.ts.sent);
 
   publish(OrderEvent{OrderEventKind::Confirmed, id, o.instrument, o.side, 0, 0,
                      o.filled_size, o.size, o.status, RejectReason::Unknown, ts});
@@ -351,9 +352,7 @@ void OrderManager::on_reject(OrderIdRaw id, RejectReason reason, Timestamp ts) {
 
   if (reason == RejectReason::CancelRejected) {
     // Benign false cancel-reject (order already completed with cancel in flight).
-    auto it = expected_false_cancel_rejects_.find(id);
-    if (it != expected_false_cancel_rejects_.end()) {
-      expected_false_cancel_rejects_.erase(it);
+    if (expected_false_cancel_rejects_.erase(id) > 0) {
       health_.on_reject(venue, /*is_false_cancel_reject=*/true);
       if (log_) log_->log(LogLevel::Info,
                           "benign false cancel-reject id=" + std::to_string(id));
@@ -397,10 +396,11 @@ void OrderManager::on_reject(OrderIdRaw id, RejectReason reason, Timestamp ts) {
   retire(id, inst, rem, side);
 }
 
-void OrderManager::on_cancel_ack(OrderIdRaw id, Timestamp ts) {
-  const ValidationResult vr = validate(id, {EventKind::CancelAck, 0, 0, 0});
+void OrderManager::finish_cancel(OrderIdRaw id, Timestamp ts, EventKind kind,
+                                 OrderEventKind pub, bool unsolicited) {
+  const ValidationResult vr = validate(id, {kind, 0, 0, 0});
   if (vr != ValidationResult::Ok) {
-    log_rejection(id, EventKind::CancelAck, vr, ts);
+    log_rejection(id, kind, vr, ts);
     ++oos_dropped_count_;
     return;
   }
@@ -412,32 +412,22 @@ void OrderManager::on_cancel_ack(OrderIdRaw id, Timestamp ts) {
   o.pending_cancel = false;
   o.status = OrderStatus::Cancelled;
   o.ts.terminal = ts;
+  if (unsolicited) {
+    ++unsolicited_cancel_count_;
+    if (log_) log_->log(LogLevel::Warn, "unsolicited cancel id=" + std::to_string(id));
+  }
 
-  publish(OrderEvent{OrderEventKind::Cancelled, id, inst, side, 0, 0,
-                     o.filled_size, o.size, o.status, RejectReason::Unknown, ts});
+  publish(OrderEvent{pub, id, inst, side, 0, 0, o.filled_size, o.size, o.status,
+                     RejectReason::Unknown, ts});
   retire(id, inst, rem, side);
 }
 
+void OrderManager::on_cancel_ack(OrderIdRaw id, Timestamp ts) {
+  finish_cancel(id, ts, EventKind::CancelAck, OrderEventKind::Cancelled, false);
+}
+
 void OrderManager::on_unsolicited_cancel(OrderIdRaw id, Timestamp ts) {
-  const ValidationResult vr = validate(id, {EventKind::UnsolicitedCancel, 0, 0, 0});
-  if (vr != ValidationResult::Ok) {
-    log_rejection(id, EventKind::UnsolicitedCancel, vr, ts);
-    ++oos_dropped_count_;
-    return;
-  }
-
-  Order& o = order_ref(id);
-  const InstrumentId inst = o.instrument;
-  const Quantity rem = o.remaining();
-  const Side side = o.side;
-  o.status = OrderStatus::Cancelled;
-  o.ts.terminal = ts;
-  ++unsolicited_cancel_count_;
-  if (log_) log_->log(LogLevel::Warn, "unsolicited cancel id=" + std::to_string(id));
-
-  publish(OrderEvent{OrderEventKind::UnsolicitedCancel, id, inst, side, 0, 0,
-                     o.filled_size, o.size, o.status, RejectReason::Unknown, ts});
-  retire(id, inst, rem, side);
+  finish_cancel(id, ts, EventKind::UnsolicitedCancel, OrderEventKind::UnsolicitedCancel, true);
 }
 
 // ---- failure-mode hooks (spec 2.11) -----------------------------------------

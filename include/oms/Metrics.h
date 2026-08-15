@@ -40,10 +40,6 @@ class MetricsCollector : public OrderEventListener {
 
   void on_order_event(const OrderEvent&) override;
 
-  // Optional: record the true arrival mid at parent-accept time (more accurate
-  // than the confirm-time capture the listener falls back to).
-  void note_arrival(OrderIdRaw id, Price arrival_mid) { arrival_mid_[id] = arrival_mid; }
-
   // A per-instrument reference VWAP so we can also report VWAP-relative slippage.
   void set_reference_vwap(InstrumentId inst, Price vwap) { ref_vwap_[inst] = vwap; }
 
