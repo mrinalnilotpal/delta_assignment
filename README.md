@@ -18,7 +18,9 @@ ctest --test-dir build --output-on-failure   # 84 tests, built with -Werror
 ```
 
 ```
-include/oms/   headers, one per component (Name.h)
+include/oms/   one header per component (Name.h), plus two cross-cutting files:
+               Common.h  - shared std includes, pulled in once via the root headers
+               Detail.h  - internal-only helpers (oms::detail), shared by the .cpp files
 src/           implementations (Name.cpp)
 sim/           deterministic simulated exchange + drivers
 tests/         Catch2 tests, one file per area (TestName.cpp)
