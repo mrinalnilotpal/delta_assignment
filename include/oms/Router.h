@@ -1,8 +1,5 @@
 #pragma once
 
-#include <optional>
-#include <vector>
-
 #include "oms/Health.h"   // pulls Types.h
 
 namespace oms {

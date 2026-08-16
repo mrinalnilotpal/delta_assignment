@@ -1,6 +1,6 @@
 #pragma once
 
-#include <cstdint>
+#include "oms/Common.h"
 
 namespace oms {
 

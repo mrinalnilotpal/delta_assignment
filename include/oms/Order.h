@@ -1,7 +1,5 @@
 #pragma once
 
-#include <array>
-
 #include "oms/OrderId.h"
 #include "oms/Types.h"
 

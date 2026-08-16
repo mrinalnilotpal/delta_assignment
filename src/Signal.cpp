@@ -1,24 +1,11 @@
 #include "oms/Signal.h"
 
-#include <cstring>
+#include "oms/Detail.h"
 
 namespace oms {
 
-namespace {
-template <typename T>
-void put(std::vector<uint8_t>& b, const T& v) {
-  const auto* p = reinterpret_cast<const uint8_t*>(&v);
-  b.insert(b.end(), p, p + sizeof(T));
-}
-
-template <typename T>
-bool get(const std::vector<uint8_t>& b, std::size_t& off, T& v) {
-  if (off + sizeof(T) > b.size()) return false;
-  std::memcpy(&v, b.data() + off, sizeof(T));
-  off += sizeof(T);
-  return true;
-}
-}  // namespace
+using detail::get;
+using detail::put;
 
 std::vector<uint8_t> serialize_signal(const SignalMessage& m) {
   std::vector<uint8_t> b;

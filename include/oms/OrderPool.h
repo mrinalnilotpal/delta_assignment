@@ -1,7 +1,5 @@
 #pragma once
 
-#include <vector>
-
 #include "oms/Order.h"   // pulls OrderId.h + Types.h
 
 namespace oms {

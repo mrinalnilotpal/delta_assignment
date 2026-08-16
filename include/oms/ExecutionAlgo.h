@@ -1,10 +1,5 @@
 #pragma once
 
-#include <memory>
-#include <string>
-#include <unordered_map>
-#include <vector>
-
 #include "oms/OrderManager.h"   // pulls Order/Types/Logging/MarketData
 
 namespace oms {

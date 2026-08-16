@@ -1,13 +1,5 @@
 #pragma once
 
-#include <cstddef>
-#include <deque>
-#include <functional>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
-
 #include "oms/ExchangeRegistry.h"   // pulls ExchangeClient.h -> Order.h -> Types.h
 #include "oms/Health.h"
 #include "oms/Logging.h"

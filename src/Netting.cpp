@@ -1,8 +1,5 @@
 #include "oms/Netting.h"
 
-#include <algorithm>
-#include <string>
-
 namespace oms {
 
 std::vector<NettingEngine::NetOrder> NettingEngine::compute_cycle(

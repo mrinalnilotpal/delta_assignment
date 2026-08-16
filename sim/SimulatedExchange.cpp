@@ -1,7 +1,5 @@
 #include "SimulatedExchange.h"
 
-#include <memory>
-
 namespace oms {
 
 SimulatedExchange::SimulatedExchange(VenueId venue, SimConfig cfg)

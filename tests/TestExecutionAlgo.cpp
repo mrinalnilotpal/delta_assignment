@@ -1,7 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
-#include <vector>
 
 #include "oms/ExecutionAlgo.h"
 #include "oms/MarketData.h"

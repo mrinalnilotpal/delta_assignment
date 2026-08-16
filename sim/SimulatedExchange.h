@@ -2,9 +2,6 @@
 
 #include <queue>
 #include <random>
-#include <unordered_map>
-#include <unordered_set>
-#include <vector>
 
 #include "oms/ExchangeRegistry.h"   // pulls ExchangeClient/MarketData/Types
 

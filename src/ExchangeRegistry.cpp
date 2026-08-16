@@ -1,16 +1,8 @@
 #include "oms/ExchangeRegistry.h"
 
-#include <cassert>
-#include <unordered_map>
+#include "oms/Detail.h"
 
 namespace oms {
-
-namespace {
-std::unordered_map<std::string, ExchangeFactoryFn>& factory_table() {
-  static std::unordered_map<std::string, ExchangeFactoryFn> table;
-  return table;
-}
-}  // namespace
 
 void ExchangeRegistry::add(std::unique_ptr<ExchangeClient> client) {
   assert(client && "null exchange client");
@@ -35,13 +27,13 @@ std::vector<VenueId> ExchangeRegistry::venues() const {
 }
 
 void ExchangeRegistry::register_factory(const std::string& name, ExchangeFactoryFn fn) {
-  factory_table()[name] = std::move(fn);
+  detail::factory_table()[name] = std::move(fn);
 }
 
 std::unique_ptr<ExchangeClient> ExchangeRegistry::create(const std::string& name,
                                                          const ExchangeConfig& cfg) {
-  auto it = factory_table().find(name);
-  if (it == factory_table().end()) return nullptr;
+  auto it = detail::factory_table().find(name);
+  if (it == detail::factory_table().end()) return nullptr;
   return it->second(cfg);
 }
 

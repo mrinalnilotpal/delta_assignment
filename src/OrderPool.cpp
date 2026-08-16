@@ -1,7 +1,5 @@
 #include "oms/OrderPool.h"
 
-#include <cassert>
-
 namespace oms {
 
 OrderPool::OrderPool(uint32_t capacity)

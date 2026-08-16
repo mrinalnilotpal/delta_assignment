@@ -1,54 +1,9 @@
 #include "oms/OrderManager.h"
 
-#include <chrono>
+#include "oms/Clock.h"
+#include "oms/Detail.h"
 
 namespace oms {
-
-namespace {
-Timestamp steady_now_ns() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
-
-const char* kind_name(EventKind k) {
-  switch (k) {
-    case EventKind::Confirm:           return "confirm";
-    case EventKind::Fill:              return "fill";
-    case EventKind::Reject:            return "reject";
-    case EventKind::CancelAck:         return "cancel_ack";
-    case EventKind::UnsolicitedCancel: return "unsolicited_cancel";
-  }
-  return "?";
-}
-
-const char* result_name(ValidationResult r) {
-  switch (r) {
-    case ValidationResult::Ok:              return "ok";
-    case ValidationResult::UnknownOrder:    return "unknown_order";
-    case ValidationResult::TerminalState:   return "terminal_state";
-    case ValidationResult::DuplicateTrade:  return "duplicate_trade";
-    case ValidationResult::StaleCumulative: return "stale_cumulative";
-    case ValidationResult::FieldMismatch:   return "field_mismatch";
-  }
-  return "?";
-}
-
-const char* status_name(OrderStatus s) {
-  switch (s) {
-    case OrderStatus::New:             return "New";
-    case OrderStatus::Sent:            return "Sent";
-    case OrderStatus::Confirmed:       return "Confirmed";
-    case OrderStatus::PartiallyFilled: return "PartiallyFilled";
-    case OrderStatus::SentCancel:      return "SentCancel";
-    case OrderStatus::CancelRejected:  return "CancelRejected";
-    case OrderStatus::Filled:          return "Filled";
-    case OrderStatus::Cancelled:       return "Cancelled";
-    case OrderStatus::Rejected:        return "Rejected";
-  }
-  return "?";
-}
-}  // namespace
 
 OrderManager::OrderManager(ExchangeRegistry& registry, Router& router,
                            HealthModel& health, ILogSink* log,
@@ -98,14 +53,14 @@ void OrderManager::log_rejection(OrderIdRaw id, EventKind kind,
     status = o.status;
   }
   log_->log(LogLevel::Error,
-            std::string("event rejected: kind=") + kind_name(kind) +
-                " reason=" + result_name(vr) +
+            std::string("event rejected: kind=") + detail::name(kind) +
+                " reason=" + detail::name(vr) +
                 " internal_id=" + std::to_string(id) +
                 " venue=" + std::to_string(d.venue) +
                 " slot=" + std::to_string(d.slot) +
                 " gen=" + std::to_string(d.generation) +
                 " exchange_id=" + (exch.empty() ? "-" : exch) +
-                " status=" + status_name(status) +
+                " status=" + detail::name(status) +
                 " event_ts=" + std::to_string(ts));
 }
 

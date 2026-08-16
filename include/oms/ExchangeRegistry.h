@@ -1,10 +1,5 @@
 #pragma once
 
-#include <functional>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "oms/ExchangeClient.h"   // pulls Types.h
 
 namespace oms {

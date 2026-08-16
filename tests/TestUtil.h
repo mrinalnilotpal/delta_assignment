@@ -1,10 +1,5 @@
 #pragma once
 
-#include <memory>
-#include <string>
-#include <unordered_map>
-#include <vector>
-
 #include "oms/OrderManager.h"   // pulls ExchangeRegistry/Health/Router/Logging
 #include "SimulatedExchange.h"
 

@@ -1,37 +1,9 @@
 #include "oms/Health.h"
 
-#include <cassert>
-#include <chrono>
+#include "oms/Clock.h"
+#include "oms/Detail.h"
 
 namespace oms {
-
-namespace {
-Timestamp steady_now_ns() {
-  return std::chrono::duration_cast<std::chrono::nanoseconds>(
-             std::chrono::steady_clock::now().time_since_epoch())
-      .count();
-}
-
-const char* state_name(HealthState s) {
-  switch (s) {
-    case HealthState::Healthy:  return "Healthy";
-    case HealthState::Degraded: return "Degraded";
-    case HealthState::Down:     return "Down";
-    case HealthState::Probing:  return "Probing";
-  }
-  return "?";
-}
-
-const char* reason_name(TripReason r) {
-  switch (r) {
-    case TripReason::None:          return "None";
-    case TripReason::Connectivity:  return "Connectivity";
-    case TripReason::RejectionRate: return "RejectionRate";
-    case TripReason::AckLatency:    return "AckLatency";
-  }
-  return "?";
-}
-}  // namespace
 
 CircuitBreakerHealthModel::CircuitBreakerHealthModel(HealthConfig cfg, ILogSink* log)
     : cfg_(cfg), log_(log), clock_(steady_now_ns) {}
@@ -142,8 +114,8 @@ void CircuitBreakerHealthModel::evaluate(VenueId id, VenueState& v, Timestamp no
   if (log_ && v.state != prev) {
     log_->log(v.state == HealthState::Healthy ? LogLevel::Info : LogLevel::Warn,
               std::string("health venue=") + std::to_string(id) +
-                  " " + state_name(prev) + "->" + state_name(v.state) +
-                  " reason=" + reason_name(v.reason) +
+                  " " + detail::name(prev) + "->" + detail::name(v.state) +
+                  " reason=" + detail::name(v.reason) +
                   " trips=" + std::to_string(v.trips) +
                   " unresolved=" + std::to_string(v.unresolved));
   }

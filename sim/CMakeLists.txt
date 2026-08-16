@@ -13,3 +13,8 @@ target_compile_options(oms_sim PRIVATE ${OMS_WARNINGS})
 add_executable(oms_bench bench.cpp)
 target_link_libraries(oms_bench PRIVATE oms_sim_lib)
 target_compile_options(oms_bench PRIVATE ${OMS_WARNINGS})
+
+# Signal-pipeline demo (producer -> gate -> netting for strategies 1..50).
+add_executable(oms_signal_demo signal_demo.cpp)
+target_link_libraries(oms_signal_demo PRIVATE oms)
+target_compile_options(oms_signal_demo PRIVATE ${OMS_WARNINGS})

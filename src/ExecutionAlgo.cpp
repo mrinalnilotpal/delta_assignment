@@ -1,15 +1,10 @@
 #include "oms/ExecutionAlgo.h"
 
-#include <algorithm>
+#include "oms/Detail.h"
 
 namespace oms {
 
-namespace {
-Quantity ceil_div(Quantity a, Quantity b) {
-  if (b <= 0) return a;
-  return (a + b - 1) / b;
-}
-}  // namespace
+using detail::ceil_div;
 
 // ---- AlgoBase ---------------------------------------------------------------
 OrderIdRaw AlgoBase::send_child(Quantity qty, Price price, OrderType type) {

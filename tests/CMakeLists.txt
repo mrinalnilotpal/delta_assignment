@@ -23,6 +23,7 @@ add_oms_test(TestOrder)
 add_oms_test(TestHealth)
 add_oms_test(TestSignal)
 add_oms_test(TestNetting)
+add_oms_test(TestSignalProducer)
 add_oms_test(TestReconciliation)
 
 add_sim_test(TestOrderManager)

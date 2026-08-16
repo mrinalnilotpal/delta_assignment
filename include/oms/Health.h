@@ -1,9 +1,5 @@
 #pragma once
 
-#include <cstddef>
-#include <functional>
-#include <unordered_map>
-
 #include "oms/Logging.h"
 #include "oms/RingBuffer.h"
 #include "oms/Types.h"

@@ -2,20 +2,16 @@
 
 #include <fstream>
 
+#include "oms/Detail.h"
+
 namespace oms {
+
+using detail::bps;
 
 double Distribution::mean() const {
   if (count_all_ == 0) return 0.0;
   return static_cast<double>(sum_) / static_cast<double>(count_all_);
 }
-
-namespace {
-int64_t bps(Price avg, Price ref, int sign) {
-  if (ref == 0) return 0;
-  const double diff = static_cast<double>(avg - ref) * static_cast<double>(sign);
-  return static_cast<int64_t>(diff / static_cast<double>(ref) * 10'000.0);
-}
-}  // namespace
 
 void MetricsCollector::on_order_event(const OrderEvent& e) {
   const Order* o = om_.find(e.internal_id);
