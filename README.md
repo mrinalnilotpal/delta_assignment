@@ -1,43 +1,75 @@
 # Order Management & Execution System
 
-Execution layer for a market-neutral book. Research publishes target positions
-`{instrument -> target_quantity}`; this system computes `target - (position +
-pending)` and works the delta into fills.
+Research publishes target positions `{instrument -> signed target}`. This layer
+computes `target - (position + pending)` per instrument and works the delta into
+fills while staying correct through the messy parts: partial fills, cancel/fill
+races, out-of-sequence events, venue health, and reconciliation.
 
-C++20, CMake, Catch2 for tests. No external trading or messaging libraries.
+C++20, CMake, Catch2. No external trading or messaging libraries.
 
-## Build
+## Build & run
 
 ```bash
-cmake -S . -B build
-cmake --build build -j
-ctest --test-dir build --output-on-failure   # 79 tests
-./build/sim/oms_sim      # minimal end-to-end demo
-./build/sim/oms_bench    # regenerates results/ (run from repo root)
+cmake -S . -B build && cmake --build build -j
+ctest --test-dir build --output-on-failure   # 79 tests, built with -Werror
+./build/sim/oms_sim     # minimal end-to-end demo
+./build/sim/oms_bench   # writes results/ (run from the repo root)
 ```
-
-Warnings are errors (`-Wall -Wextra -Werror`) on our targets.
-
-## Layout
 
 ```
 include/oms/   headers, one per component (Name.h)
 src/           implementations (Name.cpp)
-sim/           deterministic simulated exchange + drivers (oms_sim, oms_bench)
+sim/           deterministic simulated exchange + drivers
 tests/         Catch2 tests, one file per area (TestName.cpp)
 results/       benchmark output: CSVs + REPORT.md
 ```
 
+## Design decisions that matter
+
+The ones I'd defend on the call:
+
+1. **One writer per event loop, no locks on the order path.** The exchange client
+   calls back into the OrderManager synchronously inside `poll()`, on the same
+   thread, with no queue in between. A fill updates the order and the position on
+   one call stack, so they can't be seen half-applied and there's nothing to lock.
+   Concurrency comes from running independent loops, not from sharing mutable
+   order state.
+
+2. **The internal order id is the routing table.** It packs
+   `[venue:8][generation:16][slot:24][sequence:16]` into 64 bits, so an inbound
+   event decodes straight to `pool[slot]` with no hash lookup. The generation
+   counter is the safety catch: when a slot is reused its generation bumps, so a
+   late event carrying the old generation is rejected instead of corrupting
+   whoever owns the slot now.
+
+3. **Terminal state is the dedup boundary, and fills win over cancels.** Three
+   terminal states (Filled, Cancelled, Rejected); once terminal an order leaves
+   the live index and no event can touch it. If a fill and a cancel race, the fill
+   is applied and the order goes terminal — the cancel-reject that follows is
+   expected, tagged a false cancel-reject, and kept out of the health signal. This
+   one rule removes most double-counting bugs.
+
+4. **The OMS depends only on interfaces.** It knows `ExchangeClient`, `Router`,
+   `HealthModel`, `MarketDataSource` — never a concrete venue or algo. The
+   simulated exchange is just another `ExchangeClient`; grep the OMS for
+   `TwapAlgo`/`PovAlgo` and you find nothing.
+
+5. **When in doubt, halt — don't guess.** Auto-heal only where the safe action is
+   unambiguous and bounded (a small drift, a transient venue blip). A large drift
+   or a fill for an unknown order can't be told apart from corruption, so the
+   system hard-stops and waits for a human. Guessing at boot or on a big drift can
+   double real risk.
+
 ## Architecture
 
 ```
-  EXECUTION PATH (single-writer event loop)            RECONCILE LOOP (own timer)
-  -----------------------------------------            --------------------------
-  signals -> SignalGate -> NettingEngine                 PeriodicReconciler
-             +-------------------+                          - get_positions()
-             |  Strategy / Algo  |  TWAP / POV              - drift = exch - oms(filled)
-             +--------+----------+                          - band? corrective order
-                      | submit(OrderRequest)                - beyond? sticky halt
+  EXECUTION PATH (single-writer event loop)          RECONCILE LOOP (own timer)
+  -----------------------------------------          --------------------------
+  signals -> SignalGate -> NettingEngine               PeriodicReconciler
+             +-------------------+                        - get_positions()
+             |  Strategy / Algo  |  TWAP / POV            - drift = exch - oms(filled)
+             +--------+----------+                        - band? corrective order
+                      | submit(OrderRequest)              - beyond? sticky halt
                       v
      +----------------+-----------------+  select   +--------------------+
      |          OrderManager            |--------->|       Router        |
@@ -51,82 +83,57 @@ results/       benchmark output: CSVs + REPORT.md
                                             +-- MarketDataSource
 ```
 
-Two loops. The execution path is a single-writer event loop: one thread reads the
-transport, updates order and position state, and calls strategy/algo callbacks on
-the same stack. The reconcile loop runs on its own timer, reads positions, and
-submits corrective orders when needed; it never blocks the execution path.
+Two independent loops. The reconcile loop only reads positions and, inside a tight
+band, submits corrective orders; it never holds the order path and is never held
+by it.
 
-Everything depends on interfaces (`ExchangeClient`, `Router`, `HealthModel`,
-`MarketDataSource`). The simulated exchange implements the same `ExchangeClient`
-as a real venue.
+## Order lifecycle
 
-## Concurrency
+Orders live in a fixed-size pool (freelist + per-slot generation, pages committed
+up front so the first order of the day doesn't fault on the wire path). Per order
+I track internal id, exchange id, instrument, side, size, filled size, average
+price, status, and event timestamps. `remaining()` is computed, never stored, so
+it can't drift. Average price comes from a 128-bit notional accumulator divided on
+demand — no floating average, no cent drift.
 
-One writer per loop, so the order path is lock-free by construction. The exchange
-client calls back into the OrderManager synchronously from `poll()` with no queue
-between them, so a fill updates the order and position on one stack and can't be
-seen half-applied. Strategies react to published events on the loop thread; if
-they need their own work, they run a separate loop and hand off at the boundary.
-Scale by running one loop per venue/shard, shared-nothing.
+`pending_cancel` is a flag, not a status, because "partially filled and has a
+cancel in flight" is a real state a single enum can't express.
 
-## Order lifecycle (2.3)
+Every inbound handler runs one shared `validate()` first: unknown order (bad or
+stale generation), terminal state, duplicate trade id, over-fill, field sanity.
+Anything that isn't OK is logged with full context and dropped, never silently
+applied. The position updates inside `on_fill` before any subscriber runs, so
+nobody sees a fill the position doesn't yet reflect.
 
-Orders come from a fixed-size pool (freelist + per-slot generation counter, pages
-committed up front so there's no allocation on the wire path). The internal id
-packs routing into 64 bits so inbound events decode without a hash lookup:
+Terminal orders leave the live index but keep their pool slot for a short grace
+window, so a straggling duplicate resolves to "terminal, dropped" rather than
+"unknown, kill switch." Past the window the slot is reclaimed and its generation
+bumps, so genuinely stale events correctly read as unknown.
 
-```
-[venue:8][generation:16][slot:24][sequence:16]
-```
+## Exchange interface
 
-- venue routes the event to the right client.
-- slot indexes the pool directly.
-- generation bumps on slot reuse, so a late event for a recycled slot is rejected
-  instead of hitting the live order now in that slot.
+`place_order`, `cancel_order`, `get_positions`, `get_order_book`, plus
+`set_event_sink` / `poll` / `is_connected`. Sends return a `SendResult` (Ok,
+RejectedLocally, TransportDown, RateLimited, Duplicate) rather than a bare bool,
+so the caller can actually react. Capability methods like `mass_cancel` default to
+"not supported" so a venue only implements what it has.
 
-Status is one byte with three terminal states (Filled, Cancelled, Rejected).
-`pending_cancel` is a separate flag, not a status, so an order can be partially
-filled with a cancel in flight.
+Events are delivered synchronously through `ExchangeEventSink` during `poll()` —
+deliberate, for the reason in decision 1. `ExchangeRegistry` owns clients by venue
+id with a name->constructor factory. `SimulatedExchange` implements the same
+interface with seeded control over latency, partial fills, rejects, unsolicited
+cancels, reordering, and duplicates; logical time advances per `poll()`, so every
+run is reproducible.
 
-Every inbound handler starts with one `validate()` call covering: unknown order,
-terminal state, duplicate trade id, over-fill, and field sanity. Anything not OK
-is logged with context and dropped, never applied. Other rules:
+## Market data
 
-- Fills win over cancels. A fill that completes an order while a cancel is in
-  flight goes terminal; the following cancel-reject is a false cancel-reject,
-  counted and kept out of the health rejection rate.
-- Positions update inside `on_fill` before any subscriber runs, so nobody sees a
-  fill before the position reflects it.
-- A fill for an unknown order means the position is already wrong: log, request a
-  reconcile, and hard-stop if it recurs.
-- Terminal orders leave the live index but their slot is freed only after a grace
-  window, so recent duplicate/late events drop cleanly instead of looking unknown.
+I model consumption, not sourcing. `MarketDataSink` takes book/trade pushes;
+`MarketDataSource` answers `top_of_book()` and `volume_since()` — the latter is
+what POV sizes against.
 
-Prices are integer ticks (`int64_t`), never doubles. Average price is
-`total_fill_amount / filled_size`, with the notional in a 128-bit accumulator.
+## Routing & health
 
-## Exchange interface (2.4)
-
-`ExchangeClient` exposes `place_order`, `cancel_order`, `get_positions`,
-`get_order_book`, `set_event_sink`, `poll`, `is_connected`. Capability methods
-(e.g. `mass_cancel`) default to "not supported". Sends return a `SendResult` (Ok,
-RejectedLocally, TransportDown, RateLimited, Duplicate). Events arrive
-synchronously through `ExchangeEventSink` during `poll()` (see Concurrency).
-`ExchangeRegistry` owns clients by `VenueId` and has a name->constructor factory.
-
-`SimulatedExchange` implements the same interface with seeded control over
-latency, partial fills, rejects, unsolicited cancels, reordering, duplicates, and
-disconnects. Logical time advances per `poll()`, so runs are reproducible.
-
-## Market data (2.5)
-
-`MarketDataSink` receives book/trade pushes; `MarketDataSource` answers
-`top_of_book()` and `volume_since()` (what POV consumes). We model consumption,
-not sourcing.
-
-## Routing & health (2.6)
-
-Health combines three signals, each with hysteresis:
+"Healthy" is three independent signals, each with its own trip and hysteresis:
 
 | Signal | Trip | Recover |
 |---|---|---|
@@ -134,40 +141,44 @@ Health combines three signals, each with hysteresis:
 | Rejection rate | rate > high over a rolling window (false cancel-rejects excluded) | below low |
 | Ack latency | p99 > high over a rolling window | below low |
 
-Counters update from events, not polling; a timer only checks time-based
-staleness. States: Healthy -> Degraded -> Down -> (dwell) -> Probing -> Healthy.
-A recovered venue re-enters at reduced weight and must pass N round trips before
-full weight, so it doesn't flap.
+Health updates from live events, not a poll loop; a timer only notices "nothing
+arrived," which needs a clock. State machine: Healthy -> Degraded -> Down ->
+(dwell) -> Probing -> Healthy. A venue trips at the high threshold and only
+recovers below the low one after a dwell, so a borderline venue doesn't flap and
+thrash routing. On recovery it comes back at reduced weight and must pass N clean
+round trips before full weight — the venue that just came back is the least
+proven.
 
-`Router::select` returns the healthiest tradeable venue, or nothing if all are
-down. When all are down the OMS stops submitting, cancels working orders, marks
-the cycle incomplete, and alerts. It does not buffer, because a delayed order
-would trade a market that has moved.
+`Router::select` picks the healthiest tradeable venue, or nothing. All-down: stop
+submitting, cancel working orders, mark the cycle incomplete, alert. I don't
+buffer — an order released after recovery trades a market that has already moved.
 
-## Execution algos (2.7)
+## Execution algos
 
-`ExecutionAlgo` is a small interface (`start`, `on_timer`, `on_fill`, `on_reject`,
-`on_cancel`, `cancel`, `is_done`, `stats`). TWAP and POV both implement it, and
-swapping them needs no OrderManager change.
+`ExecutionAlgo` is a small event interface (`start`, `on_timer`, `on_fill`,
+`on_reject`, `on_cancel`, `cancel`, `is_done`, `stats`). What keeps TWAP and POV
+interchangeable: an algo stamps its own index into a scratch field on each child
+order and filters the global event stream by that tag. The OMS needs no algo
+registry and holds no algo references; an `AlgoDispatcher` does the routing.
+Swapping algos is a factory string.
 
-They stay decoupled by tagging: an algo stamps its index into a scratch field on
-each child order and filters the global event stream by it. The OrderManager has
-no algo registry and no references to `TwapAlgo`/`PovAlgo`; an `AlgoDispatcher`
-does the match. Algos are created by name via `AlgoFactory`.
-
-- TWAP: split `[start, end]` into N slices; each slice sends
+- **TWAP** splits the window into N slices and sizes each
   `ceil(remaining / remaining_slices)`, so partial fills are absorbed
-  automatically. Zero slices are skipped.
-- POV: each interval sends `rate * volume_observed`. When volume dries up:
-  (1) below a floor, idle; (2) shortfall past a threshold, degrade to a held TWAP
-  over the residual window; (3) at the deadline, cancel and cross with an IOC,
-  else mark the parent incomplete.
+  automatically and a zero slice is skipped rather than sent.
+- **POV** sends `rate * volume_observed` per interval. When volume dries up it
+  falls back in three stages: idle below a floor; if the shortfall grows past a
+  threshold, degrade to a held TWAP over the residual window; at the deadline,
+  cancel and cross with an IOC, else mark the parent incomplete.
 
-## Signals & staleness (2.8)
+When to prefer which: TWAP when finishing on schedule matters; POV when not being
+a visible fraction of volume matters and I can tolerate under-filling in thin
+markets.
 
-`SignalMessage { schema_version, sequence, generated_at, strategy_id, targets[] }`,
-carried over an in-process queue with a length-prefixed binary codec that rejects
-truncated buffers. Three staleness checks:
+## Signals & staleness
+
+`SignalMessage { schema_version, sequence, generated_at, strategy_id, targets[] }`
+over an in-process queue, with a length-prefixed binary codec that rejects
+truncated buffers. Staleness is three checks because signals fail three ways:
 
 | Check | Rule | Action |
 |---|---|---|
@@ -175,115 +186,122 @@ truncated buffers. Three staleness checks:
 | Sequence | wrap-aware gap vs expected | forward gap: log and continue; backward: drop |
 | Heartbeat | nothing within `interval * threshold` | producer presumed dead: stop new work, cancel resting |
 
-NaN/absurd targets are rejected at ingest.
+Absurd/NaN targets are rejected at ingest, so a poisoned value never reaches the
+delta.
 
-## Netting (2.9)
+## Netting
 
-`NettingEngine` sums per-strategy deltas into one net order per instrument,
-keeping `global_position == sum of sub_positions`. Fills are attributed pro-rata
-by contribution, with the rounding residual going to the largest contributor.
-When the net is zero but strategy deltas aren't, it sends nothing but still moves
-attributed positions (an internal transfer) and records the notional saved.
+`NettingEngine` collapses per-strategy deltas into one net order per instrument,
+holding the invariant `global == sum of sub-positions`. Fills attribute back
+pro-rata by contribution, with the rounding remainder going to the largest
+contributor (deterministic tie-break). Zero net delta: send nothing, but still
+move the attributed sub-positions to their targets (an internal transfer) and
+record the notional saved — "no order" still needs a bookkeeping update.
 
-## Reconciliation (2.10)
+## Reconciliation
 
-Source of truth: exchange for executed reality, local state for intent.
+Source of truth: the exchange for what was executed, local state for intent.
 
-Startup: seed from persisted local state, fetch exchange positions, and stay in
-do-not-trade until they reconcile. `SignalGate` boots in DNT and rejects every
-signal until `enable_trading(can_start)` clears it.
+Startup seeds from persisted state, fetches live positions, and stays in
+do-not-trade until they reconcile — `SignalGate` boots rejecting every signal
+until `enable_trading(can_start)` clears it.
 
 | Condition | Action |
 |---|---|
 | Match | proceed |
-| No persisted state | adopt exchange (cold start), log |
+| No persisted state (cold start) | adopt exchange, log |
 | Drift <= threshold | adopt exchange (auto-heal), log |
 | Drift > threshold | hard stop |
 | Exchange unreachable | hard stop |
 
-Steady state: `PeriodicReconciler` runs on its own timer. It compares exchange
-positions to the OMS filled-only position (in-flight excluded), requires the
-drift to persist across cycles before acting, emits a `reconciliation`-tagged
-corrective order inside the auto-heal band, and does a sticky halt (manual
-re-arm) beyond it. Corrective orders are excluded from metrics and netting.
+Steady state: `PeriodicReconciler` runs on its own timer, off the execution path.
+It compares the exchange to the OMS filled-only position (in-flight excluded, or
+every open order looks like drift), requires the drift to persist across cycles
+before acting (so a fill in flight during the slow `get_positions()` isn't
+chased), emits a `reconciliation`-tagged corrective order inside the auto-heal
+band, and sticky-halts beyond it. Corrective orders are excluded from metrics and
+netting.
 
-## Failure recovery (2.11)
+## Failure recovery
 
-One test per mode in `TestFailureModes.cpp`.
+Explicit policy per mode; one test each in `TestFailureModes.cpp`.
 
 | # | Mode | Handling |
 |---|---|---|
-| 1 | No confirmation | ack timer marks the order, attempts a cancel, tells health; order stays live (not assumed dead) |
-| 2 | Fill/cancel-ack out of order | fill wins; the cancel-reject is a false cancel-reject, excluded from health |
+| 1 | No confirmation | ack timer marks the order, attempts a cancel, tells health; order stays live (never assumed dead) |
+| 2 | Fill and cancel-ack out of order | fill wins; the cancel-reject is a false cancel-reject, excluded from health |
 | 3 | Unsolicited cancel | applied and logged; the algo requeues the residual |
-| 4 | Fill for unknown id | not applied; request reconcile; hard-stop if it recurs |
+| 4 | Fill for unknown id | not applied; request a reconcile; hard-stop if it recurs |
 | 5 | Duplicate fill | dropped via a per-order trade-id set |
-| 6 | Stale fill after recycle | rejected by the generation bits |
+| 6 | Stale fill after slot recycle | rejected by the generation bits |
 | 7 | Disconnect mid-flight | keep in-flight orders; reconcile on reconnect |
 | 8 | Reject storm | health trips, venue demoted, all-down if every venue trips |
-| 9 | Stale/absent signal | age + sequence + heartbeat checks |
+| 9 | Stale or absent signal | age + sequence + heartbeat checks |
 | 10 | Pool exhaustion | hard stop with a diagnostic |
 
-Auto-heal only when the safe action is unambiguous and bounded; otherwise halt
-and let a human decide. Deferred, out of scope but not forgotten: exchange
-rate-limit backoff, multi-leg atomicity, corporate actions, cross-venue
-aggregation, and journal recovery after disk corruption.
+Deferred on purpose (out of an 8-hour scope): exchange rate-limit backoff,
+multi-leg atomicity, corporate actions, cross-venue aggregation, and journal
+recovery after disk corruption.
 
-## Metrics (2.12)
+## Metrics
 
-`MetricsCollector` subscribes to OMS events and records samples cheaply;
-percentiles are computed at report time from a fixed-size ring (bounded memory).
+`MetricsCollector` listens to the OMS event stream and records samples cheaply;
+percentiles are computed at report time from a bounded ring, never an unbounded
+vector.
 
-- Slippage vs arrival mid (cost of the execution layer's delay) and vs VWAP (algo
-  skill), in bps.
+- **Slippage** against **arrival mid** (mid when the OMS accepted the parent) —
+  that captures the delay cost the execution layer owns. Also reported against
+  VWAP, which forgives a slow start and isolates algo skill. Reporting one without
+  the other hides where the cost came from.
 - Fill rate, rebalance completion rate, time to fill, ack latency.
 - Rejections, ack timeouts, unsolicited cancels, out-of-sequence drops, false
-  cancel-rejects, demotions, and netting notional saved.
+  cancel-rejects, demotions/recoveries, netting notional saved.
 
-p50/p99/p99.9 for each distribution. With few samples p99.9 collapses onto one
-observation, so it's there for shape, not precision.
+p50/p99/p99.9 per distribution. Honest caveat: with few samples p99.9 sits on a
+single observation, so it's there for shape, not precision. `oms_bench` writes
+`results/` — CSVs plus a REPORT.md that interprets the numbers.
 
-`./build/sim/oms_bench` runs a deterministic multi-cycle run with both algos and
-injected failures and writes `metrics_summary.csv`, `cycles.csv`, and a
-`REPORT.md` that interprets the numbers.
+## Concurrency
 
-## Tests (2.13)
-
-79 Catch2 tests, one file per area, all against the seeded sim: order lifecycle
-and out-of-sequence events, id encode/decode, the ten failure modes,
-routing/health, TWAP/POV under partial fills, the netting invariant, and
-reconciliation drift.
+Covered in decision 1: one writer per loop, the client calls the OMS inline from
+`poll()`, strategies react on the loop thread and run any heavy work on their own
+loop, handing off at the boundary. Scale out by running one loop per venue/shard,
+shared-nothing.
 
 ## Assumptions
 
-- Market data is available; we model consumption at top-of-book + interval volume.
+- Market data is available; consumption is top-of-book + interval volume.
 - Small instrument universe (tens to low hundreds), one loop.
-- No multi-leg atomicity or corporate actions; simplified fees.
-- Producer and OMS clocks are close enough for age checks; sequence and heartbeat
-  cover the rest.
-- Signal delivery is at-least-once (may reorder or duplicate); the gate makes it
+- No multi-leg atomicity or corporate actions; fees are a simple field, not a schedule.
+- Producer and OMS clocks are close enough for the age check; sequence and
+  heartbeat catch the rest.
+- Signal delivery is at-least-once and may reorder/duplicate; the gate makes it
   effectively exactly-once.
 
 ## What I'd do next
 
-1. Persistence: the fill journal + snapshot that startup reconciliation assumes.
-2. Live market data into POV/slippage so VWAP- and arrival-relative slippage
+1. Real persistence — the fill journal + snapshot startup reconciliation assumes
+   (today local state is passed in).
+2. Live market data into POV and slippage, so arrival- and VWAP-relative slippage
    diverge as they would in a moving market.
-3. Multi-venue benchmark so demotion shows as a routing shift, not just all-down.
+3. A multi-venue benchmark so demotion shows up as a routing shift, not just
+   all-down.
 4. Amend-in-place order flow to cut cancel/replace churn.
 5. Property-based tests for the netting invariant and the id codec.
 
 ## Scaling 5 -> 50 strategies
 
-The netting cycle breaks first: a net delta needs every strategy for that
-instrument to have published, so the slowest (or a stalled) producer sets the
-cycle time. Next, pro-rata rounding residuals accumulate into per-strategy
-position error over a day. Then per-cycle work grows with strategies times
-overlapping instruments.
+Netting breaks first: a net delta can't be computed until every strategy for that
+instrument has published, so the slowest (or a stalled) producer sets the cycle
+time. Then pro-rata rounding residuals accumulate into per-strategy position error
+over a day. Then per-cycle work grows with strategies times overlapping
+instruments.
 
 What I'd change: shard event loops by instrument (one owner per instrument keeps
-single-writer), make netting windowed instead of barrier-synchronous, and
+the single-writer property), make netting windowed instead of a hard barrier, and
 attribute fills through an exact integer ledger instead of pro-rata rounding. The
-trade-off is that sharding by instrument breaks cross-instrument netting, since
-one strategy's basket can span shards; resolving it needs a cross-shard
-coordinator (a barrier again) or accepting per-instrument netting.
+trade-off is real: sharding by instrument breaks cross-instrument netting, because
+one strategy's basket can span shards — you either add a cross-shard coordinator
+(a barrier again) or accept per-instrument netting. I'd take per-instrument
+netting and revisit only if un-netted crosses actually showed up in the slippage
+numbers.
